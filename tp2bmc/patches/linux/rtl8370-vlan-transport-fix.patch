@@ -1,0 +1,138 @@
+From: Turing Pi <support@turingpi.com>
+Subject: [PATCH] net: dsa: rtl8365mb: avoid bulk access over RTK-I2C
+
+The TP2 RTK-I2C transport supports one 16-bit register per transaction.
+Use individual register accesses for table data and VLANMC entries.
+
+---
+ drivers/net/dsa/realtek/rtl8365mb_table.c | 32 +++++++++++++-----------
+ drivers/net/dsa/realtek/rtl8365mb_vlan.c  | 37 ++++++++++++++++++----------
+ 2 files changed, 41 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/net/dsa/realtek/rtl8365mb_table.c b/drivers/net/dsa/realtek/rtl8365mb_table.c
+index f3c8749..25a749e 100644
+--- a/drivers/net/dsa/realtek/rtl8365mb_table.c
++++ b/drivers/net/dsa/realtek/rtl8365mb_table.c
+@@ -63,6 +63,7 @@ int rtl8365mb_table_query(struct realtek_priv *priv,
+ 	u32 cmd;
+ 	u32 val;
+ 	u32 hit;
++	size_t i;
+ 
+ 	/* Prepare target table and operation (read or write) */
+ 	cmd = 0;
+@@ -118,15 +119,14 @@ int rtl8365mb_table_query(struct realtek_priv *priv,
+ 
+ 	/* Write entry data if writing to the table (or L2_METHOD_MAC) */
+ 	if (write_data) {
+-		/* bulk write data up to 9th word */
+-		ret = regmap_bulk_write(priv->map_nolock,
+-					RTL8365MB_TABLE_WRITE_BASE,
+-					data,
+-					min_t(size_t, size,
+-					      RTL8365MB_TABLE_ENTRY_MAX_SIZE -
+-						      1));
+-		if (ret)
+-			goto out;
++		/* RTK-I2C supports only one register per transaction. */
++		for (i = 0; i < min_t(size_t, size,
++					 RTL8365MB_TABLE_ENTRY_MAX_SIZE - 1); i++) {
++			ret = regmap_write(priv->map_nolock,
++					   RTL8365MB_TABLE_WRITE_REG(i), data[i]);
++			if (ret)
++				goto out;
++		}
+ 
+ 		/* 10th register uses only 4 least significant bits */
+ 		if (size == RTL8365MB_TABLE_ENTRY_MAX_SIZE) {
+@@ -188,11 +188,13 @@ int rtl8365mb_table_query(struct realtek_priv *priv,
+ 
+ 	/* Finally, get the table entry if we were reading */
+ 	if (op == RTL8365MB_TABLE_OP_READ) {
+-		ret = regmap_bulk_read(priv->map_nolock,
+-				       RTL8365MB_TABLE_READ_BASE,
+-				       data, size);
+-		if (ret)
+-			goto out;
++		for (i = 0; i < size; i++) {
++			ret = regmap_read(priv->map_nolock,
++					  RTL8365MB_TABLE_READ_REG(i), &val);
++			if (ret)
++				goto out;
++			data[i] = val;
++		}
+ 
+ 		/* For the biggest table entries, the uppermost table
+ 		 * entry register has space for only one nibble. Mask
+diff --git a/drivers/net/dsa/realtek/rtl8365mb_vlan.c b/drivers/net/dsa/realtek/rtl8365mb_vlan.c
+index ef03237..e1689a8 100644
+--- a/drivers/net/dsa/realtek/rtl8365mb_vlan.c
++++ b/drivers/net/dsa/realtek/rtl8365mb_vlan.c
+@@ -372,12 +372,17 @@ static int rtl8365mb_vlan_mc_read(struct realtek_priv *priv, u32 index,
+ 				  struct rtl8365mb_vlanmc *vlanmc)
+ {
+ 	u16 data[RTL8365MB_VLAN_MC_ENTRY_SIZE];
++	u32 val;
++	int i;
+ 	int ret;
+ 
+-	ret = regmap_bulk_read(priv->map, RTL8365MB_VLAN_MC_REG(index), &data,
+-			       RTL8365MB_VLAN_MC_ENTRY_SIZE);
+-	if (ret)
+-		return ret;
++	for (i = 0; i < RTL8365MB_VLAN_MC_ENTRY_SIZE; i++) {
++		ret = regmap_read(priv->map, RTL8365MB_VLAN_MC_REG(index) + i,
++				  &val);
++		if (ret)
++			return ret;
++		data[i] = val;
++	}
+ 
+ 	vlanmc->member = FIELD_GET(RTL8365MB_VLAN_MC_D0_MBR_MASK, data[0]);
+ 	vlanmc->fid = FIELD_GET(RTL8365MB_VLAN_MC_D1_FID_MASK, data[1]);
+@@ -397,6 +402,7 @@ static int rtl8365mb_vlan_mc_write(struct realtek_priv *priv, u32 index,
+ 				   const struct rtl8365mb_vlanmc *vlanmc)
+ {
+ 	u16 data[RTL8365MB_VLAN_MC_ENTRY_SIZE] = { 0 };
++	int i;
+ 	int ret;
+ 
+ 	data[0] |= FIELD_PREP(RTL8365MB_VLAN_MC_D0_MBR_MASK, vlanmc->member);
+@@ -411,21 +417,28 @@ static int rtl8365mb_vlan_mc_write(struct realtek_priv *priv, u32 index,
+ 			      vlanmc->priority_en);
+ 	data[3] |= FIELD_PREP(RTL8365MB_VLAN_MC_D3_EVID_MASK, vlanmc->evid);
+ 
+-	ret = regmap_bulk_write(priv->map, RTL8365MB_VLAN_MC_REG(index), &data,
+-				RTL8365MB_VLAN_MC_ENTRY_SIZE);
++	for (i = 0; i < RTL8365MB_VLAN_MC_ENTRY_SIZE; i++) {
++		ret = regmap_write(priv->map, RTL8365MB_VLAN_MC_REG(index) + i,
++				   data[i]);
++		if (ret)
++			return ret;
++	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static int rtl8365mb_vlan_mc_erase(struct realtek_priv *priv, u32 index)
+ {
+-	u16 data[RTL8365MB_VLAN_MC_ENTRY_SIZE] = { 0 };
++	int i;
+ 	int ret;
+ 
+-	ret = regmap_bulk_write(priv->map, RTL8365MB_VLAN_MC_REG(index), &data,
+-				RTL8365MB_VLAN_MC_ENTRY_SIZE);
++	for (i = 0; i < RTL8365MB_VLAN_MC_ENTRY_SIZE; i++) {
++		ret = regmap_write(priv->map, RTL8365MB_VLAN_MC_REG(index) + i, 0);
++		if (ret)
++			return ret;
++	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ /*
+-- 
+2.50.1

@@ -1,0 +1,206 @@
+diff --git a/drivers/net/dsa/realtek/realtek-smi.c b/drivers/net/dsa/realtek/realtek-smi.c
+index fe7fa886436f..f123456789ab 100644
+--- a/drivers/net/dsa/realtek/realtek-smi.c
++++ b/drivers/net/dsa/realtek/realtek-smi.c
+@@ -37,3 +37,5 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/platform_device.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <linux/i2c.h>
+@@ -196,3 +198,189 @@
++static struct realtek_priv *realtek_smi_debugfs_priv;
++
++static int realtek_smi_vlan4k_read(struct realtek_priv *priv, unsigned int vid,
++				   unsigned int table[3])
++{
++	unsigned int value;
++	int ret, word;
++
++	ret = regmap_read_poll_timeout(priv->map, 0x0502, value,
++				       !(value & 0x2000), 10, 10000);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(priv->map, 0x0501, vid);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(priv->map, 0x0500, 0x000f, 0x0003);
++	if (ret)
++		return ret;
++
++	ret = regmap_read_poll_timeout(priv->map, 0x0502, value,
++				       !(value & 0x2000), 10, 10000);
++	if (ret)
++		return ret;
++
++	for (word = 0; word < 3; word++) {
++		ret = regmap_read(priv->map, 0x0520 + word, &table[word]);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int realtek_smi_vlan4k_write(struct realtek_priv *priv,
++				    unsigned int vid,
++				    const unsigned int table[3])
++{
++	unsigned int value;
++	int ret, word;
++
++	for (word = 0; word < 3; word++) {
++		ret = regmap_write(priv->map, 0x0510 + word, table[word]);
++		if (ret)
++			return ret;
++	}
++
++	ret = regmap_write(priv->map, 0x0501, vid);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(priv->map, 0x0500, 0x000f, 0x000b);
++	if (ret)
++		return ret;
++
++	return regmap_read_poll_timeout(priv->map, 0x0502, value,
++					!(value & 0x2000), 10, 10000);
++}
++
++static int realtek_smi_debugfs_show(struct seq_file *s, void *data)
++{
++	static const unsigned int vids[] = { 0, 1, 20, 100, 4094 };
++	static const unsigned int probe[] = { 0, 0x4000, 0 };
++	struct realtek_priv *priv = realtek_smi_debugfs_priv;
++	unsigned int chip_id, chip_revision, value;
++	unsigned int original[3], table[3];
++	int restore_ret;
++	int index, port, ret, vid, word;
++
++	if (!priv || !priv->map)
++		return -ENODEV;
++
++	/* The ID window is readable only while the driver's selector is set. */
++	ret = regmap_write(priv->map, 0x13c2, 0x0249);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(priv->map, 0x1300, &chip_id);
++	if (ret)
++		goto clear_selector;
++
++	ret = regmap_read(priv->map, 0x1301, &chip_revision);
++	if (ret)
++		goto clear_selector;
++
++	ret = regmap_write(priv->map, 0x13c2, 0);
++	if (ret)
++		return ret;
++
++	seq_printf(s, "chip_id=0x%04x\n", chip_id);
++	seq_printf(s, "chip_revision=0x%04x\n", chip_revision);
++
++	for (index = 0; index < 6; index++) {
++		ret = regmap_read(priv->map, 0x0700 + index, &value);
++		if (ret)
++			return ret;
++		seq_printf(s, "pvid_ctrl[%d]=0x%04x\n", index, value);
++	}
++
++	for (index = 0; index < 32; index++) {
++		seq_printf(s, "vlan_mc[%d]=", index);
++		for (word = 0; word < 4; word++) {
++			ret = regmap_read(priv->map,
++					  0x0728 + index * 4 + word, &value);
++			if (ret)
++				return ret;
++			seq_printf(s, "%s%04x", word ? " " : "", value);
++		}
++		seq_putc(s, '\n');
++	}
++
++	for (index = 0; index < 4; index++) {
++		ret = regmap_read(priv->map, 0x07a8 + index, &value);
++		if (ret)
++			return ret;
++		seq_printf(s, "vlan_ctrl[0x%04x]=0x%04x\n",
++			   0x07a8 + index, value);
++	}
++
++	for (port = 0; port < 10; port++) {
++		ret = regmap_read(priv->map, 0x000e + (port << 5), &value);
++		if (ret)
++			return ret;
++		seq_printf(s, "port_misc[%d]=0x%04x\n", port, value);
++	}
++
++	for (vid = 0; vid < ARRAY_SIZE(vids); vid++) {
++		ret = realtek_smi_vlan4k_read(priv, vids[vid], table);
++		if (ret)
++			return ret;
++
++		seq_printf(s, "vlan4k[%u]=%04x %04x %04x\n", vids[vid],
++			   table[0], table[1], table[2]);
++	}
++
++	memcpy(original, table, sizeof(original));
++	ret = realtek_smi_vlan4k_write(priv, 4094, probe);
++	if (ret)
++		return ret;
++
++	ret = realtek_smi_vlan4k_read(priv, 4094, table);
++	if (!ret)
++		seq_printf(s, "vlan4k_probe=written %04x %04x %04x\n",
++			   table[0], table[1], table[2]);
++
++	restore_ret = realtek_smi_vlan4k_write(priv, 4094, original);
++	if (restore_ret)
++		return restore_ret;
++	if (ret)
++		return ret;
++
++	ret = realtek_smi_vlan4k_read(priv, 4094, table);
++	if (ret)
++		return ret;
++	seq_printf(s, "vlan4k_probe=restored %04x %04x %04x\n",
++		   table[0], table[1], table[2]);
++	if (memcmp(original, table, sizeof(original)))
++		return -EIO;
++	return 0;
++
++clear_selector:
++	regmap_write(priv->map, 0x13c2, 0);
++	return ret;
++}
++
++static int realtek_smi_debugfs_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, realtek_smi_debugfs_show, inode->i_private);
++}
++
++static const struct file_operations realtek_smi_debugfs_fops = {
++	.owner = THIS_MODULE,
++	.open = realtek_smi_debugfs_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++static void realtek_smi_debugfs_init(struct realtek_priv *priv)
++{
++	realtek_smi_debugfs_priv = priv;
++	debugfs_create_file("rtl8370_identity", 0400, NULL, priv,
++			    &realtek_smi_debugfs_fops);
++}
++
+ static int realtek_smi_probe(struct i2c_client *client)
+ {
+ 	const struct realtek_variant *var;
+@@ -249,4 +437,5 @@ static int realtek_smi_probe(struct i2c_client *client)
+ 	i2c_set_clientdata(client, priv);
+ 	spin_lock_init(&priv->lock);
++	realtek_smi_debugfs_init(priv);
+ 
+ 	/* TODO: if power is software controlled, set up any regulators here */
