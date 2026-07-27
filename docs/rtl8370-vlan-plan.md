@@ -322,19 +322,38 @@ delivered about 1.5 Gbps of aggregate replicated node egress while maintaining
 hardware containment. Temporary receive-buffer settings and test scripts were
 removed after validation.
 
-Attempts to request 800 Mbps exposed the RK1 traffic-generator ceiling. The
-Python sender sustained 616 Mbps and a compiled C sender with batched
-`sendmmsg()` calls sustained 619 Mbps; both completed the requested packet
-count but required about 13 seconds instead of 10. A dual-source 400+400 Mbps
-attempt reached approximately 617 Mbps aggregate because each source also had
-to receive the other source's flooded multicast, and one management probe
-timed out under that host load. The Hub uplink remained contained throughout.
+The userspace Python, C `sendmmsg()`, and iperf3 UDP senders each plateaued at
+approximately 619 Mbps, despite TCP reaching 920-940 Mbps. This isolated the
+limit to per-datagram host overhead rather than the VLAN or switch. The RK1
+kernel `pktgen` module was then used to generate tagged multicast directly on
+`end1.20`.
 
-A 900 Mbps stage was not run because the available RK1 sources cannot generate
-that rate reliably. Establishing an 800-900 Mbps switch limit requires an
-external line-rate generator or hardware traffic generator; labeling the
-current approximately 619 Mbps source ceiling as an 800/900 Mbps test would be
-incorrect.
+Initial pktgen runs became lossy above 900 Mbps because the default 512-entry
+TX ring and CPU 0 interrupt placement delayed descriptor reclamation. Increasing
+the temporary TX ring to 1,024 entries, running pktgen on big core 4, and moving
+the `end1` IRQs to big core 6 made 900-950 Mbps reproducibly lossless.
+
+| Requested | Generated | Receiver result |
+| --- | --- | --- |
+| 800 Mbps | 799.92 Mbps | 714,281 of 714,286 packets on each node |
+| 900 Mbps | 900.02 Mbps | 803,571 of 803,571 packets on each node |
+| 925 Mbps | 924.91 Mbps | 825,892 of 825,892 packets on each node |
+| 950 Mbps | 949.94 Mbps | 848,214 of 848,214 packets on each node |
+| 955 Mbps | 954.96 Mbps | 852,621 of 852,678 packets on each node |
+| 960 Mbps | 959.85 Mbps | 857,048-857,049 of 857,142 packets |
+| 975 Mbps | 969.96 Mbps | 868,211-868,212 of 870,535 packets |
+
+A 30-second 950 Mbps soak generated 2,544,642 packets with zero pktgen errors;
+each receiver counted 2,544,639 packets. There were no management probe
+failures at any tuned rate, and `ge1` remained at normal background traffic.
+At 950 Mbps the switch replicated approximately 2.85 Gbps of aggregate egress
+across the three receiving node ports while preserving VLAN containment.
+
+The practical lossless ceiling for this packet profile is 950 Mbps. At 955 Mbps
+the first small loss appears, and a requested 975 Mbps saturates near 970 Mbps
+because Ethernet framing reaches the physical gigabit boundary. All temporary
+ring, IRQ-affinity, socket-buffer, pktgen, and test-file changes were restored
+after validation.
 
 ### Persistent Configuration
 
