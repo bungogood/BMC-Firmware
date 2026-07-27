@@ -322,6 +322,20 @@ delivered about 1.5 Gbps of aggregate replicated node egress while maintaining
 hardware containment. Temporary receive-buffer settings and test scripts were
 removed after validation.
 
+Attempts to request 800 Mbps exposed the RK1 traffic-generator ceiling. The
+Python sender sustained 616 Mbps and a compiled C sender with batched
+`sendmmsg()` calls sustained 619 Mbps; both completed the requested packet
+count but required about 13 seconds instead of 10. A dual-source 400+400 Mbps
+attempt reached approximately 617 Mbps aggregate because each source also had
+to receive the other source's flooded multicast, and one management probe
+timed out under that host load. The Hub uplink remained contained throughout.
+
+A 900 Mbps stage was not run because the available RK1 sources cannot generate
+that rate reliably. Establishing an 800-900 Mbps switch limit requires an
+external line-rate generator or hardware traffic generator; labeling the
+current approximately 619 Mbps source ceiling as an 800/900 Mbps test would be
+incorrect.
+
 ### Persistent Configuration
 
 `/etc/init.d/S41vlan` waits for `br0` and all DSA ports, adds tagged VID 20 to
