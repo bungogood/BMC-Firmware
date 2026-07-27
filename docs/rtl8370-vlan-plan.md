@@ -295,6 +295,33 @@ counters by approximately 500 packets while the `ge1` transmit counter
 increased only by its normal background traffic. This agrees with the hardware
 member mask, which excludes the BT Hub uplink.
 
+### 2026-07-27: Throughput Validation
+
+A sequence-numbered UDP multicast harness sent 1,400-byte payloads for ten
+seconds per stage while three nodes received, the BMC continuously probed all
+management addresses, and the `ge1` transmit counter was monitored.
+
+| Rate | Sender | Receivers | Result |
+| --- | --- | --- | --- |
+| 10 Mbps | `tpn1` | `tpn2-4` | 8,644 packets each, zero loss |
+| 50 Mbps | `tpn1` | `tpn2-4` | `tpn3-4` lossless; `tpn2` lost 7-8 of 43,222 packets |
+| 100 Mbps | `tpn2` | `tpn1`, `tpn3-4` | 86,445 packets each, zero loss |
+| 250 Mbps | `tpn2` | `tpn1`, `tpn3-4` | 216,113 packets each, zero loss |
+| 500 Mbps | `tpn2` | `tpn1`, `tpn3-4` | 432,226 packets each, zero loss |
+
+The small 50 Mbps loss was isolated to `tpn2` as a receiver and repeated after
+raising its socket receive buffer from 416 KiB to 32 MiB. It had no UDP buffer,
+NIC, or DSA error counters and was carrying substantially more unrelated host
+traffic than the other receivers. Rotating `tpn2` to the sender produced
+lossless reception through 500 Mbps, so this is a host receive-scheduling
+effect rather than a switch forwarding limit.
+
+Every stage had zero management probe failures. At 500 Mbps, `ge1` increased by
+only 189 ambient packets rather than the 432,226 multicast packets. The switch
+delivered about 1.5 Gbps of aggregate replicated node egress while maintaining
+hardware containment. Temporary receive-buffer settings and test scripts were
+removed after validation.
+
 ### Persistent Configuration
 
 `/etc/init.d/S41vlan` waits for `br0` and all DSA ports, adds tagged VID 20 to
