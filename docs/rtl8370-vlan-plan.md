@@ -246,8 +246,77 @@ recovered within eight seconds. VLANMC entry 1 then read back correctly as
 `006f 0000 0000 0001`, representing VLAN 1 membership on all six external
 ports.
 
-Tagged VID 20 has been staged in the Linux bridge on all four node ports while
-bridge filtering remains disabled. A disconnected `ge0` test confirmed that
-the per-port ingress-filter bit changes correctly. Filtering will not be
-enabled on the live bridge until the extended diagnostic explicitly verifies
-the VID 1 and VID 20 VLAN4K entries.
+The first VLAN4K diagnostic incorrectly used `regmap_update_bits()` to issue
+the indirect table command. Regmap suppresses the bus write when the register
+already contains the requested value, but each command-register write is the
+trigger for a new table operation. Consecutive reads therefore returned stale
+data and made valid driver writes appear empty. The corrected diagnostic
+preserves unrelated command-register bits but always performs a register
+write.
+
+With forced commands, the live table readback is:
+
+```text
+vlan4k[1]=7f7f 4000 0000
+vlan4k[20]=000f 4000 0000
+```
+
+VID 1 contains ports 0-6 as members and untagged egress ports. VID 20 contains
+only node ports 0-3 and uses tagged egress. The BT Hub uplink on port 6 is not
+a VID 20 member.
+
+### 2026-07-27: Filtering and Containment Validation
+
+Filtering was first tested on disconnected `ge0`. With VID 20 active, the
+hardware entry read `0020 4000 0000` and ingress filtering bit 5 was set. The
+test rolled back to an empty VID 20 member mask and cleared the ingress bit.
+
+The live `br0` bridge was then configured with tagged VID 20 on `node1` through
+`node4`, leaving `ge0` and `ge1` in VID 1 only. Enabling bridge VLAN filtering
+produced:
+
+```text
+vlan_ctrl[0x07a9]=0x006f
+port_misc[0-3]=0x4880
+port_misc[4]=0x48b0
+port_misc[5-6]=0x4880
+vlan4k[1]=7f7f 4000 0000
+vlan4k[20]=000f 4000 0000
+```
+
+All four management addresses remained reachable. Temporary node interfaces
+were assigned `10.20.0.1/24` through `10.20.0.4/24`; bidirectional unicast
+completed with zero loss.
+
+Ten UDP multicast datagrams sent to `239.192.0.1:9400` from `10.20.0.1` were
+received by each of the other three nodes. A subsequent 500-packet, 50-pps
+VLAN 20 broadcast containment test increased the participating node-port
+counters by approximately 500 packets while the `ge1` transmit counter
+increased only by its normal background traffic. This agrees with the hardware
+member mask, which excludes the BT Hub uplink.
+
+### Persistent Configuration
+
+`/etc/init.d/S41vlan` waits for `br0` and all DSA ports, adds tagged VID 20 to
+the four node ports, and then enables bridge VLAN filtering. Any setup failure
+leaves filtering disabled. Its stop path disables filtering before deleting
+VID 20.
+
+Each RK1 node has `/etc/netplan/60-vlan20.yaml`, generated from these settings:
+
+| Node | Interface | Address |
+| --- | --- | --- |
+| `tpn1` | `end0.20` | `10.20.0.1/24` |
+| `tpn2` | `end1.20` | `10.20.0.2/24` |
+| `tpn3` | `end1.20` | `10.20.0.3/24` |
+| `tpn4` | `end1.20` | `10.20.0.4/24` |
+
+The final BMC image was reboot-tested. Filtering returned automatically,
+hardware VIDs 1 and 20 matched the expected masks, all management nodes
+recovered within eight seconds, and VLAN 20 unicast connectivity passed.
+
+Emergency runtime rollback on the BMC is:
+
+```sh
+ip link set br0 type bridge vlan_filtering 0
+```

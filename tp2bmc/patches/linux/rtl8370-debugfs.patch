@@ -8,8 +8,22 @@ index fe7fa886436f..f123456789ab 100644
 +#include <linux/debugfs.h>
 +#include <linux/seq_file.h>
  #include <linux/i2c.h>
-@@ -196,3 +198,189 @@
+@@ -196,3 +198,168 @@
 +static struct realtek_priv *realtek_smi_debugfs_priv;
++
++static int realtek_smi_vlan4k_command(struct realtek_priv *priv,
++				      unsigned int command)
++{
++	unsigned int value;
++	int ret;
++
++	ret = regmap_read(priv->map, 0x0500, &value);
++	if (ret)
++		return ret;
++
++	value = (value & ~0x000f) | command;
++	return regmap_write(priv->map, 0x0500, value);
++}
 +
 +static int realtek_smi_vlan4k_read(struct realtek_priv *priv, unsigned int vid,
 +				   unsigned int table[3])
@@ -26,7 +40,7 @@ index fe7fa886436f..f123456789ab 100644
 +	if (ret)
 +		return ret;
 +
-+	ret = regmap_update_bits(priv->map, 0x0500, 0x000f, 0x0003);
++	ret = realtek_smi_vlan4k_command(priv, 0x0003);
 +	if (ret)
 +		return ret;
 +
@@ -44,39 +58,12 @@ index fe7fa886436f..f123456789ab 100644
 +	return 0;
 +}
 +
-+static int realtek_smi_vlan4k_write(struct realtek_priv *priv,
-+				    unsigned int vid,
-+				    const unsigned int table[3])
-+{
-+	unsigned int value;
-+	int ret, word;
-+
-+	for (word = 0; word < 3; word++) {
-+		ret = regmap_write(priv->map, 0x0510 + word, table[word]);
-+		if (ret)
-+			return ret;
-+	}
-+
-+	ret = regmap_write(priv->map, 0x0501, vid);
-+	if (ret)
-+		return ret;
-+
-+	ret = regmap_update_bits(priv->map, 0x0500, 0x000f, 0x000b);
-+	if (ret)
-+		return ret;
-+
-+	return regmap_read_poll_timeout(priv->map, 0x0502, value,
-+					!(value & 0x2000), 10, 10000);
-+}
-+
 +static int realtek_smi_debugfs_show(struct seq_file *s, void *data)
 +{
 +	static const unsigned int vids[] = { 0, 1, 20, 100, 4094 };
-+	static const unsigned int probe[] = { 0, 0x4000, 0 };
 +	struct realtek_priv *priv = realtek_smi_debugfs_priv;
 +	unsigned int chip_id, chip_revision, value;
-+	unsigned int original[3], table[3];
-+	int restore_ret;
++	unsigned int table[3];
 +	int index, port, ret, vid, word;
 +
 +	if (!priv || !priv->map)
@@ -101,6 +88,21 @@ index fe7fa886436f..f123456789ab 100644
 +
 +	seq_printf(s, "chip_id=0x%04x\n", chip_id);
 +	seq_printf(s, "chip_revision=0x%04x\n", chip_revision);
++
++	for (index = 0; index < 3; index++) {
++		ret = regmap_read(priv->map, 0x0500 + index, &value);
++		if (ret)
++			return ret;
++		seq_printf(s, "table_ctrl[0x%04x]=0x%04x\n",
++			   0x0500 + index, value);
++	}
++
++	for (index = 0; index < 3; index++) {
++		ret = regmap_read(priv->map, 0x0510 + index, &value);
++		if (ret)
++			return ret;
++		seq_printf(s, "table_write[%d]=0x%04x\n", index, value);
++	}
 +
 +	for (index = 0; index < 6; index++) {
 +		ret = regmap_read(priv->map, 0x0700 + index, &value);
@@ -145,29 +147,6 @@ index fe7fa886436f..f123456789ab 100644
 +			   table[0], table[1], table[2]);
 +	}
 +
-+	memcpy(original, table, sizeof(original));
-+	ret = realtek_smi_vlan4k_write(priv, 4094, probe);
-+	if (ret)
-+		return ret;
-+
-+	ret = realtek_smi_vlan4k_read(priv, 4094, table);
-+	if (!ret)
-+		seq_printf(s, "vlan4k_probe=written %04x %04x %04x\n",
-+			   table[0], table[1], table[2]);
-+
-+	restore_ret = realtek_smi_vlan4k_write(priv, 4094, original);
-+	if (restore_ret)
-+		return restore_ret;
-+	if (ret)
-+		return ret;
-+
-+	ret = realtek_smi_vlan4k_read(priv, 4094, table);
-+	if (ret)
-+		return ret;
-+	seq_printf(s, "vlan4k_probe=restored %04x %04x %04x\n",
-+		   table[0], table[1], table[2]);
-+	if (memcmp(original, table, sizeof(original)))
-+		return -EIO;
 +	return 0;
 +
 +clear_selector:

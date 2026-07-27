@@ -1,0 +1,69 @@
+#!/bin/sh
+
+VLAN_ID=20
+VLAN_PORTS="node1 node2 node3 node4"
+ALL_PORTS="$VLAN_PORTS ge0 ge1"
+
+wait_for_bridge() {
+    attempts=30
+
+    while [ "$attempts" -gt 0 ]; do
+        ready=1
+        ip link show br0 >/dev/null 2>&1 || ready=0
+        for port in $ALL_PORTS; do
+            ip link show "$port" >/dev/null 2>&1 || ready=0
+        done
+        [ "$ready" -eq 1 ] && return 0
+        attempts=$((attempts - 1))
+        sleep 1
+    done
+
+    return 1
+}
+
+start() {
+    if ! wait_for_bridge; then
+        echo "VLAN setup skipped: br0 ports did not become ready" >&2
+        return 1
+    fi
+
+    for port in $VLAN_PORTS; do
+        if ! bridge vlan add dev "$port" vid "$VLAN_ID"; then
+            echo "Failed to add VLAN $VLAN_ID to $port" >&2
+            ip link set br0 type bridge vlan_filtering 0
+            return 1
+        fi
+    done
+
+    if ! ip link set br0 type bridge vlan_filtering 1; then
+        echo "Failed to enable VLAN filtering on br0" >&2
+        ip link set br0 type bridge vlan_filtering 0
+        return 1
+    fi
+
+    echo "Enabled tagged VLAN $VLAN_ID on RK1 node ports"
+}
+
+stop() {
+    ip link set br0 type bridge vlan_filtering 0 2>/dev/null || true
+    for port in $VLAN_PORTS; do
+        bridge vlan del dev "$port" vid "$VLAN_ID" 2>/dev/null || true
+    done
+}
+
+case "$1" in
+    start|"")
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
